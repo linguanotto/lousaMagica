@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lousa Magica</title>
+  <style>
+    :root{ --bg:#0b1020; --panel:#111831; --line:#20306a; --txt:#e6ecff; --accent:#7cf3c6; }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial; color:var(--txt); background:#0b1020;}
+    .wrap{display:grid; grid-template-rows:auto 1fr auto; min-height:100%}
+    header{padding:12px 16px; border-bottom:1px solid var(--line); background:#0f1733}
+    header h1{margin:0; font-size:18px}
+    main{display:grid; grid-template-columns:320px 1fr; gap:14px; padding:14px}
+    @media (max-width: 900px){ main{grid-template-columns:1fr} }
+    .panel{background:#111831; border:1px solid var(--line); border-radius:14px; padding:12px}
+    .panel h2{margin:0 0 8px 0; font-size:14px; color:#cfe2ff}
+    .row{display:flex; align-items:center; justify-content:space-between; gap:8px; margin:10px 0}
+    label{font-size:13px}
+    input[type="range"], input[type="color"], button{appearance:none; font:inherit}
+    .btn{padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:#131a3a; color:var(--txt); cursor:pointer}
+    .btn.alt{background:#0f1530}
+    .btn.danger{background:#2a0e14; border-color:#6b2637; color:#ffd6de}
+    .stat{font-size:12px; color:#b9c8ff}
+
+    .stage{position:relative; width:100%; aspect-ratio:16/9; background:#0a0f22; border:1px solid var(--line); border-radius:16px; overflow:hidden}
+    /* Espelha vídeo e os canvas (efeito selfie) */
+    video, canvas{
+      position:absolute; inset:0; width:100%; height:100%;
+      object-fit:cover; transform: scaleX(-1);
+    }
+    /* Logo fixo no canto inferior direito (não espelhar) */
+    #logoMarca{
+      position:absolute; right:10px; bottom:10px; width:300px;
+      opacity:.9; pointer-events:none; z-index:6; filter:drop-shadow(0 2px 4px rgba(0,0,0,.5));
+    }
+
+    .hud{position:absolute; top:10px; left:10px; display:flex; gap:8px; z-index:5}
+    .chip{padding:6px 10px; border-radius:999px; font-size:12px; background:#0f1635; border:1px solid var(--line)}
+    footer{padding:10px 14px; border-top:1px solid var(--line); background:#0f1733; font-size:12px; opacity:.9}
+    a{color:var(--accent)}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>FabLab - CE413 - Mogi das Cruzes</h1></header>
+  <main>
+    <section class="panel" style="height:fit-content">
+      <h2>Controles</h2>
+      <div class="row"><label>Cor</label><input id="color" type="color" value="#7cf3c6" /></div>
+      <div class="row"><label>Espessura <span id="thOut" class="stat">6px</span></label><input id="size" type="range" min="1" max="30" step="1" value="6" /></div>
+      <div class="row"><label>Suavização <span id="smOut" class="stat">0.60</span></label><input id="smooth" type="range" min="0" max="0.95" step="0.05" value="0.60" /></div>
+      <div class="row"><label>Modo de desenho</label>
+        <div style="display:flex; gap:8px; flex-wrap:wrap">
+          <button id="toggleDraw" class="btn">Ativar desenho</button>
+          <button id="pinchMode" class="btn alt">Modo: pinch</button>
+          <button id="eraser" class="btn alt">Borracha</button>
+          <button id="clear" class="btn danger">Limpar tela</button>
+        </div>
+      </div>
+      <div class="row"><label>Atalhos</label><div class="stat">D: desenho • E: borracha • C: limpar • P: pinch/contínuo</div></div>
+      <div class="row"><label>Status</label><div id="status" class="stat">Iniciando…</div></div>
+      <div class="row"><label>Exportar</label><a href="#" id="dl">Baixar desenho (PNG)</a></div>
+    </section>
+
+    <section class="stage panel">
+      <div class="hud">
+        <span class="chip" id="fps">FPS: —</span>
+        <span class="chip" id="modeChip">Modo: pinch</span>
+        <span class="chip" id="drawChip">Desenho: off</span>
+        <span class="chip">Junte polegar + indicador para desenhar</span>
+      </div>
+      <video id="video" playsinline></video>
+      <canvas id="overlay"></canvas>
+      <canvas id="paint"></canvas>
+      <!-- Logo fixo -->
+      <img id="logoMarca" src="imagens/Logos FABLAB.png" alt="Logo FAB LAB">
+    </section>
+  </main>
+  <footer>
+    Segurança: tudo roda no seu navegador (localhost/https). Se a câmera falhar, feche Zoom/Teams e permita a câmera no cadeado.
+  </footer>
+</div>
+
+<script>
+(function(){
+  const video = document.getElementById('video');
+  const overlay = document.getElementById('overlay');
+  const paint = document.getElementById('paint');
+  const octx = overlay.getContext('2d');
+  const pctx = paint.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const fpsEl = document.getElementById('fps');
+  const modeChip = document.getElementById('modeChip');
+  const drawChip = document.getElementById('drawChip');
+  const color = document.getElementById('color');
+  const size = document.getElementById('size');
+  const smooth = document.getElementById('smooth');
+  const thOut = document.getElementById('thOut');
+  const smOut = document.getElementById('smOut');
+  const dl = document.getElementById('dl');
+  const btnDraw = document.getElementById('toggleDraw');
+  const btnPinch = document.getElementById('pinchMode');
+  const btnEraser = document.getElementById('eraser');
+  const btnClear = document.getElementById('clear');
+
+  let drawEnabled = false;   // manual (contínuo) quando não estiver em modo pinch
+  let pinchMode = true;      // padrão: desenhar só quando “pinçar”
+  let erasing = false;
+  let lastPt = null;
+  let ema = null;            // suavização por EMA
+
+  // 🕒 Auto-limpeza por inatividade (30s desde o último traço)
+  let inactivityTimer;
+  const INACTIVITY_LIMIT = 30000; // 30s
+  function resetInactivityTimer(){
+    clearTimeout(inactivityTimer);
+    inactivityTimer = setTimeout(()=>{
+      pctx.clearRect(0,0,paint.width,paint.height);
+      statusEl.textContent = 'Tela limpa por inatividade (30s).';
+    }, INACTIVITY_LIMIT);
+  }
+
+  function setCanvasSize(){
+    const r = overlay.getBoundingClientRect();
+    overlay.width = r.width; overlay.height = r.height;
+    paint.width = r.width; paint.height = r.height;
+  }
+  window.addEventListener('resize', setCanvasSize);
+  setTimeout(setCanvasSize, 60);
+
+  size.addEventListener('input', ()=> thOut.textContent = size.value + 'px');
+  smooth.addEventListener('input', ()=> smOut.textContent = parseFloat(smooth.value).toFixed(2));
+
+  btnDraw.onclick = ()=>{ drawEnabled = !drawEnabled; updateChips(); };
+  btnPinch.onclick = ()=>{ pinchMode = !pinchMode; updateChips(); };
+  btnEraser.onclick = ()=>{ erasing = !erasing; updateChips(); };
+  btnClear.onclick = ()=>{ pctx.clearRect(0,0,paint.width,paint.height); resetInactivityTimer(); };
+
+  document.addEventListener('keydown', (e)=>{
+    const k = e.key.toLowerCase();
+    if(k==='d'){ drawEnabled=!drawEnabled; updateChips(); }
+    if(k==='p'){ pinchMode=!pinchMode; updateChips(); }
+    if(k==='e'){ erasing=!erasing; updateChips(); }
+    if(k==='c'){ pctx.clearRect(0,0,paint.width,paint.height); resetInactivityTimer(); }
+  });
+
+  dl.addEventListener('click', (e)=>{
+    e.preventDefault();
+    const tmp = document.createElement('canvas');
+    tmp.width = paint.width; tmp.height = paint.height;
+    const tctx = tmp.getContext('2d');
+    tctx.drawImage(paint,0,0);
+    const url = tmp.toDataURL('image/png');
+    const a = document.createElement('a'); a.href = url; a.download = 'airdraw.png'; a.click();
+  });
+
+  function updateChips(){
+    drawChip.textContent = 'Desenho: ' + (drawEnabled? 'on':'off');
+    modeChip.textContent = 'Modo: ' + (pinchMode? 'pinch':'contínuo');
+    btnDraw.textContent = drawEnabled? 'Desativar desenho':'Ativar desenho';
+    btnPinch.textContent = pinchMode? 'Modo: pinch':'Modo: contínuo';
+    btnEraser.textContent = erasing? 'Borracha: ON' : 'Borracha';
+  }
+  updateChips();
+
+  // FPS
+  let lastTs = performance.now();
+  function tickFPS(){
+    const now = performance.now();
+    const fps = 1000/(now-lastTs); lastTs = now;
+    fpsEl.textContent = 'FPS: ' + fps.toFixed(0);
+  }
+
+  // MediaPipe Hands
+  const hands = new Hands({locateFile: (file)=> `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+  hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+  hands.onResults(onResults);
+
+  function lerp(a,b,t){ return a+(b-a)*t; }
+
+  function onResults(results){
+    octx.clearRect(0,0,overlay.width,overlay.height);
+    if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
+      const lm = results.multiHandLandmarks[0];
+      // Landmarks/linhas aparecem espelhados visualmente (CSS scaleX(-1))
+      drawConnectors(octx, lm, HAND_CONNECTIONS, {color:'#3a4b9a55', lineWidth:2});
+      drawLandmarks(octx, lm, {color:'#9bd3ff', lineWidth:1});
+
+      const idx = lm[8];   // ponta do indicador
+      const th  = lm[4];   // ponta do polegar
+
+      // NÃO inverter x por código — espelho já é feito via CSS
+      const pt = { x: idx.x * overlay.width, y: idx.y * overlay.height };
+
+      // Suavização (EMA)
+      const alpha = parseFloat(smooth.value);
+      if(!ema) ema = {x:pt.x, y:pt.y};
+      ema.x = lerp(ema.x, pt.x, 1-alpha);
+      ema.y = lerp(ema.y, pt.y, 1-alpha);
+
+      // Pinch
+      const pinchDist = Math.hypot(idx.x - th.x, idx.y - th.y);
+      const isPinching = pinchDist < 0.07;
+
+      // Cursor
+      octx.beginPath(); octx.arc(ema.x, ema.y, 6, 0, Math.PI*2);
+      octx.fillStyle = isPinching? '#7cf3c6' : '#9bd3ff'; octx.fill();
+
+      // Desenho
+      const shouldDraw = (pinchMode ? isPinching : drawEnabled);
+      if(shouldDraw){
+        const w = parseInt(size.value,10);
+        pctx.lineCap = 'round'; pctx.lineJoin = 'round';
+        pctx.strokeStyle = erasing ? '#000' : color.value;
+        pctx.globalCompositeOperation = erasing ? 'destination-out' : 'source-over';
+        pctx.lineWidth = w;
+        pctx.beginPath();
+        if(lastPt){ pctx.moveTo(lastPt.x, lastPt.y); pctx.lineTo(ema.x, ema.y); }
+        else { pctx.moveTo(ema.x, ema.y); pctx.lineTo(ema.x+0.1, ema.y+0.1); }
+        pctx.stroke();
+        lastPt = {x:ema.x, y:ema.y};
+
+        // Reinicia o timer a cada traço
+        resetInactivityTimer();
+      } else {
+        lastPt = null;
+      }
+
+      statusEl.textContent = isPinching? 'Desenhando (pinch)…' : 'Mão detectada';
+    } else {
+      statusEl.textContent = 'Mostre a mão para a câmera';
+      lastPt = null; ema = null;
+    }
+  }
+
+  async function start(){
+    try{
+      const stream = await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280}, height:{ideal:720}}, audio:false});
+      video.srcObject = stream; await video.play();
+      setCanvasSize();
+      const camera = new Camera(video, { onFrame: async ()=>{ await hands.send({image: video}); tickFPS(); }, width:1280, height:720 });
+      camera.start();
+      statusEl.textContent = 'Câmera ok. Detectando mão…';
+      resetInactivityTimer(); // começa o timer mesmo sem desenhar
+    }catch(err){
+      console.error(err);
+      let msg = 'Erro ao acessar a câmera: ' + err.name + ' — ' + err.message;
+      if(err.name === 'NotAllowedError') msg += ' • Permita a câmera no cadeado do navegador.';
+      if(err.name === 'NotFoundError') msg += ' • Nenhuma câmera detectada.';
+      if(err.name === 'NotReadableError' || err.name === 'TrackStartError') msg += ' • Feche apps que estejam usando a câmera (Zoom/Teams).';
+      statusEl.textContent = msg;
+    }
+  }
+  start();
+})();
+</script>
+</body>
+</html>
